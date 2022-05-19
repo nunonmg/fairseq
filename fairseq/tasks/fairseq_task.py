@@ -10,6 +10,7 @@ from argparse import Namespace
 from typing import Any, Callable, Dict, List
 
 import torch
+import numpy as np
 from fairseq import metrics, search, tokenizer, utils
 from fairseq.data import Dictionary, FairseqDataset, data_utils, encoders, iterators
 from fairseq.dataclass import FairseqDataclass
@@ -222,6 +223,7 @@ class FairseqTask(object):
         skip_remainder_batch=False,
         grouped_shuffling=False,
         update_epoch_batch_itr=False,
+        order_by_size=True,
     ):
         """
         Get an iterator that yields batches of data from the given dataset.
@@ -280,10 +282,13 @@ class FairseqTask(object):
 
         # initialize the dataset with the correct starting epoch
         dataset.set_epoch(epoch)
-
+        
         # get indices ordered by example size
-        with data_utils.numpy_seed(seed):
-            indices = dataset.ordered_indices()
+        if order_by_size:
+            with data_utils.numpy_seed(seed):
+                indices = dataset.ordered_indices()
+        else:
+            indices = np.array(range(len(dataset)))
 
         # filter examples that are too large
         if max_positions is not None:
@@ -319,7 +324,7 @@ class FairseqTask(object):
 
         return epoch_iter
 
-    def build_model(self, cfg: FairseqDataclass, from_checkpoint=False):
+    def build_model(self, cfg: FairseqDataclass):
         """
         Build the :class:`~fairseq.models.BaseFairseqModel` instance for this
         task.
@@ -332,7 +337,7 @@ class FairseqTask(object):
         """
         from fairseq import models, quantization_utils
 
-        model = models.build_model(cfg, self, from_checkpoint)
+        model = models.build_model(cfg, self)
         model = quantization_utils.quantize_model_scalar(model, cfg)
         return model
 
@@ -655,7 +660,7 @@ class LegacyFairseqTask(FairseqTask):
     def has_sharded_data(self, split):
         return os.pathsep in getattr(self.args, "data", "")
 
-    def build_model(self, args: Namespace, from_checkpoint=False):
+    def build_model(self, args: Namespace):
         """
         Build the :class:`~fairseq.models.BaseFairseqModel` instance for this
         task.
@@ -668,7 +673,7 @@ class LegacyFairseqTask(FairseqTask):
         """
         from fairseq import models, quantization_utils
 
-        model = models.build_model(args, self, from_checkpoint)
+        model = models.build_model(args, self)
         model = quantization_utils.quantize_model_scalar(model, args)
         return model
 

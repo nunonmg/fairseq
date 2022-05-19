@@ -68,6 +68,8 @@ class SequenceScorer(object):
             decoder_out = model(**net_input)
             attn = decoder_out[1] if len(decoder_out) > 1 else None
             if type(attn) is dict:
+                keys = attn.get("inner_states", None)
+                keys = keys[-1].transpose(0,1)
                 attn = attn.get("attn", None)
 
             batched = batch_for_softmax(decoder_out, orig_target)
@@ -127,6 +129,7 @@ class SequenceScorer(object):
             score_i = avg_probs_i.sum() / tgt_len
             if avg_attn is not None:
                 avg_attn_i = avg_attn[i]
+                keys_i = keys[i]
                 if self.compute_alignment:
                     alignment = utils.extract_hard_alignment(
                         avg_attn_i,
@@ -147,6 +150,7 @@ class SequenceScorer(object):
                         "attention": avg_attn_i,
                         "alignment": alignment,
                         "positional_scores": avg_probs_i,
+                        "keys": keys_i,
                     }
                 ]
             )

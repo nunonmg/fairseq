@@ -4,16 +4,16 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
-import sys
+from mimetypes import read_mime_types
 from typing import Dict, List, Optional
+import sys
 
 import torch
 import torch.nn as nn
-from torch import Tensor
-
 from fairseq import search, utils
 from fairseq.data import data_utils
 from fairseq.models import FairseqIncrementalDecoder
+from torch import Tensor
 from fairseq.ngram_repeat_block import NGramRepeatBlock
 
 
@@ -81,7 +81,6 @@ class SequenceGenerator(nn.Module):
         self.beam_size = beam_size
         # the max beam size is the dictionary size - 1, since we never select pad
         self.beam_size = min(beam_size, self.vocab_size - 1)
-        self.model.set_decoder_beam_size(self.beam_size)
         self.max_len_a = max_len_a
         self.max_len_b = max_len_b
         self.min_len = min_len
@@ -279,6 +278,7 @@ class SequenceGenerator(nn.Module):
         )  # +2 for eos and pad
         tokens[:, 0] = self.eos if bos_token is None else bos_token
         attn: Optional[Tensor] = None
+        keys: Optional[Tensor] = None
 
         # A list that indicates candidates that should be ignored.
         # For example, suppose we're sampling and have already finalized 2/5
@@ -337,12 +337,13 @@ class SequenceGenerator(nn.Module):
                 )
             with torch.autograd.profiler.record_function(
                 "EnsembleModel: forward_decoder"
-            ):
-                lprobs, avg_attn_scores = self.model.forward_decoder(
+            ):  
+                lprobs, avg_attn_scores, key_state = self.model.forward_decoder(
                     tokens[:, : step + 1],
                     encoder_outs,
                     incremental_states,
                     self.temperature,
+                    output_key_state=True,
                 )
 
             if self.lm_model is not None:
@@ -384,6 +385,13 @@ class SequenceGenerator(nn.Module):
                     ).to(scores)
                 attn[:, :, step + 1].copy_(avg_attn_scores)
 
+            if key_state is not None:
+                if keys is None:
+                    keys = torch.empty(
+                        bsz * beam_size, key_state.size(1), max_len + 2
+                    ).to(scores)
+                keys[:, :, step + 1].copy_(key_state)
+            
             scores = scores.type_as(lprobs)
             eos_bbsz_idx = torch.empty(0).to(
                 tokens
@@ -440,6 +448,7 @@ class SequenceGenerator(nn.Module):
                     finished,
                     beam_size,
                     attn,
+                    keys,
                     src_lengths,
                     max_len,
                 )
@@ -488,6 +497,11 @@ class SequenceGenerator(nn.Module):
                     attn = attn.view(bsz, -1)[batch_idxs].view(
                         new_bsz * beam_size, attn.size(1), -1
                     )
+                if keys is not None:
+                    keys = keys.view(bsz, -1)[batch_idxs].view(
+                        new_bsz * beam_size, keys.size(1), -1
+                    )
+
                 bsz = new_bsz
             else:
                 batch_idxs = None
@@ -555,6 +569,12 @@ class SequenceGenerator(nn.Module):
                     attn[:, :, : step + 2], dim=0, index=active_bbsz_idx
                 )
 
+            # copy keys for active hypotheses
+            if keys is not None:
+                keys[:, :, : step + 2] = torch.index_select(
+                    keys[:, :, : step + 2], dim=0, index=active_bbsz_idx
+                )
+
             # reorder incremental state in decoder
             reorder_state = active_bbsz_idx
 
@@ -568,6 +588,7 @@ class SequenceGenerator(nn.Module):
             finalized[sent] = torch.jit.annotate(
                 List[Dict[str, Tensor]], finalized[sent]
             )
+
         return finalized
 
     def _prefix_tokens(
@@ -615,6 +636,7 @@ class SequenceGenerator(nn.Module):
         finished: List[bool],
         beam_size: int,
         attn: Optional[Tensor],
+        keys: Optional[Tensor],
         src_lengths,
         max_len: int,
     ):
@@ -642,6 +664,12 @@ class SequenceGenerator(nn.Module):
             else None
         )
 
+        keys_clone = (
+            keys.index_select(0, bbsz_idx)[:, :, 1 : step + 2]
+            if attn is not None
+            else None
+        )
+        
         # compute scores per token position
         pos_scores = scores.index_select(0, bbsz_idx)[:, : step + 1]
         pos_scores[:, step] = eos_scores
@@ -665,7 +693,7 @@ class SequenceGenerator(nn.Module):
                 cum_unfin.append(prev)
         cum_fin_tensor = torch.tensor(cum_unfin, dtype=torch.int).to(bbsz_idx)
 
-        unfin_idx = torch.div(bbsz_idx, beam_size, rounding_mode="trunc")
+        unfin_idx = torch.div(bbsz_idx, beam_size, rounding_mode="floor")
         sent = unfin_idx + torch.index_select(cum_fin_tensor, 0, unfin_idx)
 
         # Create a set of "{sent}{unfin_idx}", where
@@ -691,11 +719,18 @@ class SequenceGenerator(nn.Module):
                 else:
                     hypo_attn = torch.empty(0)
 
+                if keys_clone is not None:
+                    # remove padding tokens from attn scores
+                    hypo_keys = keys_clone[i]
+                else:
+                    hypo_keys = torch.empty(0)
+
                 finalized[sent_list[i]].append(
                     {
                         "tokens": tokens_clone[i],
                         "score": eos_scores[i],
                         "attention": hypo_attn,  # src_len x tgt_len
+                        "keys": hypo_keys,
                         "alignment": torch.empty(0),
                         "positional_scores": pos_scores[i],
                     }
@@ -770,13 +805,6 @@ class EnsembleModel(nn.Module):
             + [sys.maxsize]
         )
 
-    def set_decoder_beam_size(self, beam_size):
-        """Set beam size for efficient beamable enc-dec attention."""
-        if beam_size > 1:
-            for model in self.models:
-                if hasattr(model, "set_beam_size"):
-                    model.set_beam_size(beam_size)
-
     @torch.jit.export
     def forward_encoder(self, net_input: Dict[str, Tensor]):
         if not self.has_encoder():
@@ -790,6 +818,7 @@ class EnsembleModel(nn.Module):
         encoder_outs: List[Dict[str, List[Tensor]]],
         incremental_states: List[Dict[str, Dict[str, Optional[Tensor]]]],
         temperature: float = 1.0,
+        output_key_state: bool = False,
     ):
         log_probs = []
         avg_attn: Optional[Tensor] = None
@@ -811,6 +840,7 @@ class EnsembleModel(nn.Module):
                     decoder_out = model.forward(tokens)
 
             attn: Optional[Tensor] = None
+            key_state: Optional[Tensor] = None
             decoder_len = len(decoder_out)
             if decoder_len > 1 and decoder_out[1] is not None:
                 if isinstance(decoder_out[1], Tensor):
@@ -824,6 +854,10 @@ class EnsembleModel(nn.Module):
                 if attn is not None:
                     attn = attn[:, -1, :]
 
+            decoder_len = len(decoder_out)
+            if decoder_len > 1 and decoder_out[1] is not None:
+                key_state = decoder_out[1]["inner_states"][-1][0, :, :]
+
             decoder_out_tuple = (
                 decoder_out[0][:, -1:, :].div_(temperature),
                 None if decoder_len <= 1 else decoder_out[1],
@@ -832,7 +866,9 @@ class EnsembleModel(nn.Module):
                 decoder_out_tuple, log_probs=True, sample=None
             )
             probs = probs[:, -1, :]
-            if self.models_size == 1:
+            if self.models_size == 1 and output_key_state:
+                return probs, attn, key_state
+            elif self.models_size == 1 and not output_key_state:
                 return probs, attn
 
             log_probs.append(probs)
@@ -840,7 +876,7 @@ class EnsembleModel(nn.Module):
                 if avg_attn is None:
                     avg_attn = attn
                 else:
-                    avg_attn.add_(attn)
+                    avg_attn.add_(attn)                
 
         avg_probs = torch.logsumexp(torch.stack(log_probs, dim=0), dim=0) - math.log(
             self.models_size
@@ -848,6 +884,7 @@ class EnsembleModel(nn.Module):
 
         if avg_attn is not None:
             avg_attn.div_(self.models_size)
+        
         return avg_probs, avg_attn
 
     @torch.jit.export
