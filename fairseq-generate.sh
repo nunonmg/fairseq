@@ -39,10 +39,12 @@ CUDA_VISIBLE_DEVICES=3 fairseq-generate $DATA \
     --path /home/nunomg/mt-hallucinations/HALO/fairseq/checkpoints/wmt18_${src_lang}-${tgt_lang}/${CKPT}.pt --source-lang $src_lang --target-lang $tgt_lang\
     --gen-subset valid --beam 5 --batch-size 128 --sacrebleu --scoring sacrebleu --remove-bpe=sentencepiece --eval-bleu-remove-bpe sentencepiece --quiet --skip-invalid-size-inputs-valid-test | tee $DATA/${CKPT}/gen.out
 
-python3 /home/nunomg/mt-hallucinations/HALO/fairseq/halls_finder/step0/f1_finder.py --data_bin $DATA/$CKPT
-python3 /home/nunomg/mt-hallucinations/HALO/fairseq/halls_finder/step0/f2_finder.py --data_bin $DATA/$CKPT
-python3 /home/nunomg/mt-hallucinations/HALO/fairseq/halls_finder/step0/repscore_compute.py --data_bin $DATA/$CKPT
-CUDA_VISIBLE_DEVICES=3 python3 /home/nunomg/mt-hallucinations/HALO/fairseq/halls_finder/step0/qualitymetrics_compute.py --data_bin $DATA/$CKPT --metric_model comet-qe-da
+
+
+# python3 /home/nunomg/mt-hallucinations/HALO/fairseq/halls_finder/step0/f1_finder.py --data_bin $DATA/$CKPT
+# python3 /home/nunomg/mt-hallucinations/HALO/fairseq/halls_finder/step0/f2_finder.py --data_bin $DATA/$CKPT
+# python3 /home/nunomg/mt-hallucinations/HALO/fairseq/halls_finder/step0/repscore_compute.py --data_bin $DATA/$CKPT
+# CUDA_VISIBLE_DEVICES=3 python3 /home/nunomg/mt-hallucinations/HALO/fairseq/halls_finder/step0/qualitymetrics_compute.py --data_bin $DATA/$CKPT --metric_model comet-qe-da
 
 # echo "Running Heldout"
 # src_lang=de

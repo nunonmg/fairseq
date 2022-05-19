@@ -133,6 +133,8 @@ data-bin/
 experimental/*
 checkpoints/
 data-bin/
+examples/mt-hallucinations/halls_finder/mc_dropout_files
+examples/translation/data*
 
 # Weights and Biases logs
 wandb/

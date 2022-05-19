@@ -12,8 +12,10 @@ import logging
 import math
 import os
 import sys
+import pickle
 from argparse import Namespace
 from itertools import chain
+import pandas as pd
 
 import numpy as np
 import torch
@@ -102,6 +104,8 @@ def _main(cfg: DictConfig, output_file):
         num_shards=cfg.checkpoint.checkpoint_shard_count,
     )
 
+    model_tag = cfg.common_eval.path.split("/")[-1].replace(".pt","")
+
     # loading the dataset should happen after the checkpoint has been loaded so we can give it the saved task config
     task.load_dataset(cfg.dataset.gen_subset, task_cfg=saved_cfg.task)
 
@@ -152,6 +156,7 @@ def _main(cfg: DictConfig, output_file):
         shard_id=cfg.distributed_training.distributed_rank,
         num_workers=cfg.dataset.num_workers,
         data_buffer_size=cfg.dataset.data_buffer_size,
+        no_length_ordering=cfg.generation.no_length_ordering,
     ).next_epoch_itr(shuffle=False)
     progress = progress_bar.progress_bar(
         itr,
@@ -181,6 +186,21 @@ def _main(cfg: DictConfig, output_file):
 
     scorer = scoring.build_scorer(cfg.scoring, tgt_dict)
 
+    if not cfg.generation.score_reference:
+        dataframe_tag = "/dataframes/"
+        stats_tag = "/stats/" 
+    else:
+        dataframe_tag = "/dataframes_score_refs/"
+        stats_tag = "/stats_score_refs/"
+    
+    if not os.path.exists(cfg.task.data + dataframe_tag):
+        os.makedirs(cfg.task.data + dataframe_tag)
+    
+    if cfg.generation.save_attn_maps or cfg.generation.save_pos_scores or cfg.generation.save_model_keys:
+        os.makedirs(cfg.task.data + stats_tag)
+
+    outputs_for_file = []
+    stats_for_file = []
     num_sentences = 0
     has_target = True
     wps_meter = TimeMeter()
@@ -269,6 +289,16 @@ def _main(cfg: DictConfig, output_file):
                     remove_bpe=cfg.common_eval.post_process,
                     extra_symbols_to_ignore=get_symbols_to_strip_from_output(generator),
                 )
+                dict_for_output = {"idx": sample_id, "src": src_str, "mt": hypo_str, "ref": target_str, "src_ids": src_tokens.cpu().tolist(), "mt_ids": hypo["tokens"].cpu().tolist(), \
+                        "ref_ids": target_tokens.cpu().tolist(), "score": round(hypo["score"].item(),5)}
+                stats_for_output = {}
+                if cfg.generation.save_attn_maps:
+                    stats_for_output["attention"] = hypo["attention"].cpu().tolist()
+                elif cfg.generation.save_pos_scores:
+                    stats_for_output["positional_scores"] = hypo["positional_scores"].cpu().tolist()
+                elif cfg.generation.save_model_keys:
+                    stats_for_output["keys"] = hypo["keys"].cpu().tolist()
+
                 detok_hypo_str = decode_fn(hypo_str)
                 if not cfg.common_eval.quiet:
                     score = hypo["score"] / math.log(2)  # convert to base 2
@@ -360,12 +390,43 @@ def _main(cfg: DictConfig, output_file):
                         scorer.add_string(target_str, detok_hypo_str)
                     else:
                         scorer.add(target_tokens, hypo_tokens)
+                outputs_for_file.append(dict_for_output)
+                stats_for_file.append(stats_for_output)
 
         wps_meter.update(num_generated_tokens)
         progress.log({"wps": round(wps_meter.avg)})
         num_sentences += (
             sample["nsentences"] if "nsentences" in sample else sample["id"].numel()
         )
+
+    dataframe_for_file = pd.DataFrame(outputs_for_file)
+    dataframe_saving_path = cfg.task.data + dataframe_tag + "df_gen_stats"
+    dataframe_for_file.to_pickle(dataframe_saving_path)
+    print("Saved Dataframe of results.")
+
+    if cfg.generation.save_model_keys:
+        stats_for_save = {k: [dic[k] for dic in stats_for_file] for k in stats_for_file[0]}
+        keys = stats_for_save["keys"]
+        stats_saving_path = cfg.task.data + stats_tag + "stats_test_keys"
+        with open(stats_saving_path, 'wb') as handle:
+            pickle.dump(keys, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        print("Saved dictionary of keys.")
+    if cfg.generation.save_attn_maps:
+        stats_for_save = {k: [dic[k] for dic in stats_for_file] for k in stats_for_file[0]}
+        attn_maps = stats_for_save["attention"]
+        stats_saving_path = cfg.task.data + stats_tag + "stats_test_attention"
+        attn_maps = utils.attn_shape_curation(attn_maps, dataframe_for_file)
+        with open(stats_saving_path, 'wb') as handle:
+            pickle.dump(attn_maps, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        print("Saved dictionary of attention maps.")
+    if cfg.generation.save_pos_scores:
+        stats_for_save = {k: [dic[k] for dic in stats_for_file] for k in stats_for_file[0]}
+        pos_scores = stats_for_save["positional_scores"]
+        stats_saving_path = cfg.task.data + stats_tag + "stats_test_positional_scores"
+        with open(stats_saving_path, 'wb') as handle:
+            pickle.dump(pos_scores, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        print("Saved dictionary of positional scores.")
+
 
     logger.info("NOTE: hypothesis and token scores are output in base 2")
     logger.info(

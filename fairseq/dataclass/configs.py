@@ -1001,6 +1001,30 @@ class GenerationConfig(FairseqDataclass):
         default=None,
         metadata={"help": "EOS token"},
     )
+    save_attn_maps: bool = field(
+        default=False,
+        metadata={"help": "Save attention maps for the generated translations"},
+    )
+    save_pos_scores: bool = field(
+        default=False,
+        metadata={"help": "Save positional scores for the generated translations"},
+    )
+    save_model_keys: bool = field(
+        default=False,
+        metadata={"help": "Save model keys for the generated translations"},
+    )
+    savepath_stats: Optional[str] = field(
+        default=None,
+        metadata={"help": "Savepath for the stats of the generated translations"},
+    )
+    compute_comet_qe: bool = field(
+        default=False,
+        metadata={"help": "Compute COMET-QE for the generated translations"},
+    )
+    no_length_ordering: bool = field(
+        default=False,
+        metadata={"help": "Order batches by length"},
+    )
 
 
 @dataclass

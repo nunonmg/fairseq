@@ -1,0 +1,3 @@
+SRC_LANG=de
+TGT_LANG=en
+INPUT=

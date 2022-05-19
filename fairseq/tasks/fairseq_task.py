@@ -223,7 +223,7 @@ class FairseqTask(object):
         skip_remainder_batch=False,
         grouped_shuffling=False,
         update_epoch_batch_itr=False,
-        order_by_size=True,
+        no_length_ordering=False,
     ):
         """
         Get an iterator that yields batches of data from the given dataset.
@@ -284,7 +284,7 @@ class FairseqTask(object):
         dataset.set_epoch(epoch)
         
         # get indices ordered by example size
-        if order_by_size:
+        if not no_length_ordering:
             with data_utils.numpy_seed(seed):
                 indices = dataset.ordered_indices()
         else:

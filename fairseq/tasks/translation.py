@@ -296,6 +296,11 @@ class TranslationTask(FairseqTask):
 
         paths = utils.split_paths(cfg.data)
         assert len(paths) > 0
+
+        if cfg.source_lang is None and cfg.target_lang is None:
+            print("Source and target not explicitly defined.")
+            cfg.source_lang = "de"
+            cfg.target_lang = "en"
         # find language pair automatically
         if cfg.source_lang is None or cfg.target_lang is None:
             cfg.source_lang, cfg.target_lang = data_utils.infer_language_pair(paths[0])
@@ -365,8 +370,8 @@ class TranslationTask(FairseqTask):
             constraints=constraints,
         )
 
-    def build_model(self, cfg, from_checkpoint=False):
-        model = super().build_model(cfg, from_checkpoint)
+    def build_model(self, cfg):
+        model = super().build_model(cfg)
         if self.cfg.eval_bleu:
             detok_args = json.loads(self.cfg.eval_bleu_detok_args)
             self.tokenizer = encoders.build_tokenizer(
@@ -378,6 +383,17 @@ class TranslationTask(FairseqTask):
                 [model], Namespace(**gen_args)
             )
         return model
+
+    def forward_and_get_hidden_state_step(self, sample, model):
+        # add by  
+        # forward the model with the sample, and get the decoder hidden state used for datastore
+        # and we only need the feature
+        decoder_output, extra = model(src_tokens=sample['net_input']['src_tokens'],
+                                      src_lengths=sample['net_input']['src_lengths'],
+                                      prev_output_tokens=sample['net_input']['prev_output_tokens'],
+                                      return_all_hiddens=False,
+                                      features_only=True)
+        return decoder_output
 
     def valid_step(self, sample, model, criterion):
         loss, sample_size, logging_output = super().valid_step(sample, model, criterion)
