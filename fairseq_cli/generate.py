@@ -197,7 +197,8 @@ def _main(cfg: DictConfig, output_file):
         os.makedirs(cfg.task.data + dataframe_tag)
     
     if cfg.generation.save_attn_maps or cfg.generation.save_pos_scores or cfg.generation.save_model_keys:
-        os.makedirs(cfg.task.data + stats_tag)
+        if not os.path.exists(cfg.task.data + stats_tag):
+            os.makedirs(cfg.task.data + stats_tag)
 
     outputs_for_file = []
     stats_for_file = []
@@ -293,7 +294,22 @@ def _main(cfg: DictConfig, output_file):
                         "ref_ids": target_tokens.cpu().tolist(), "score": round(hypo["score"].item(),5)}
                 stats_for_output = {}
                 if cfg.generation.save_attn_maps:
-                    stats_for_output["attention"] = hypo["attention"].cpu().tolist()
+                    if cfg.generation.score_reference:
+                        attn = hypo["attention"]
+                        src_len, ref_len = len(src_tokens), len(hypo["tokens"])
+                        if attn.shape != (ref_len, src_len):
+                            breakpoint()
+                            attn = attn[:ref_len, :src_len]
+                            assert attn.shape == (ref_len, src_len)
+                        stats_for_output["attention"] = np.array(attn.cpu())
+                    else:
+                        attn = hypo["attention"]
+                        src_len, mt_len = len(src_tokens), len(hypo["tokens"])
+                        if attn.shape != (src_len, mt_len):
+                            # attn = attn[:mt_len, :src_len]
+                            breakpoint()
+                            # assert attn.shape == (mt_len, src_len)
+                        stats_for_output["attention"] = np.array(attn.cpu())
                 elif cfg.generation.save_pos_scores:
                     stats_for_output["positional_scores"] = hypo["positional_scores"].cpu().tolist()
                 elif cfg.generation.save_model_keys:
@@ -400,7 +416,7 @@ def _main(cfg: DictConfig, output_file):
         )
 
     dataframe_for_file = pd.DataFrame(outputs_for_file)
-    dataframe_saving_path = cfg.task.data + dataframe_tag + "df_gen_stats"
+    dataframe_saving_path = cfg.task.data + dataframe_tag + "df_gen_stats.pkl"
     dataframe_for_file.to_pickle(dataframe_saving_path)
     print("Saved Dataframe of results.")
 
@@ -415,7 +431,7 @@ def _main(cfg: DictConfig, output_file):
         stats_for_save = {k: [dic[k] for dic in stats_for_file] for k in stats_for_file[0]}
         attn_maps = stats_for_save["attention"]
         stats_saving_path = cfg.task.data + stats_tag + "stats_test_attention"
-        attn_maps = utils.attn_shape_curation(attn_maps, dataframe_for_file)
+        #attn_maps = utils.attn_shape_curation(attn_maps, dataframe_for_file)
         with open(stats_saving_path, 'wb') as handle:
             pickle.dump(attn_maps, handle, protocol=pickle.HIGHEST_PROTOCOL)
         print("Saved dictionary of attention maps.")

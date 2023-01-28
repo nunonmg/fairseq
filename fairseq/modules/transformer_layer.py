@@ -492,14 +492,13 @@ class TransformerDecoderLayerBase(nn.Module):
                 key_padding_mask=encoder_padding_mask,
                 incremental_state=incremental_state,
                 static_kv=True,
-                need_weights=need_attn or (not self.training and self.need_attn),
+                need_weights=True,
                 need_head_weights=need_head_weights,
             )
             x = self.dropout_module(x)
             x = self.residual_connection(x, residual)
             if not self.normalize_before:
                 x = self.encoder_attn_layer_norm(x)
-
         residual = x
         if self.normalize_before:
             x = self.final_layer_norm(x)

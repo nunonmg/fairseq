@@ -92,6 +92,18 @@ class FairseqTask(object):
         Args:
             filename (str): the filename
         """
+        if filename == '/mnt/vol/gfsai-flash3-east/aml/langtech/shuo/mtml/data/wmt2020_qe/train/ro-en/tmp/data-bin/tokenized.ro-en/dict.ro.txt':
+            filename = '/home/nunomg/hallucinations-in-mt/fairseq/checkpoints/mlqe_ro-en/dict.ro.txt'
+
+        if filename == '/mnt/vol/gfsai-flash3-east/aml/langtech/shuo/mtml/data/wmt2020_qe/train/ro-en/tmp/data-bin/tokenized.ro-en/dict.en.txt':
+            filename = '/home/nunomg/hallucinations-in-mt/fairseq/checkpoints/mlqe_ro-en/dict.en.txt'
+
+        if filename == '/private/home/pipibjc/workdir/flores/reproduce/flores/experiments/bt_iter1/en-ne/synthetic/bt/data-bin/dict.ne.txt':
+            filename = '/home/nunomg/hallucinations-in-mt/fairseq/checkpoints/mlqe_ne-en/dict.ne.txt'
+
+        if filename == '/private/home/pipibjc/workdir/flores/reproduce/flores/experiments/bt_iter1/en-ne/synthetic/bt/data-bin/dict.en.txt':
+            filename = '/home/nunomg/hallucinations-in-mt/fairseq/checkpoints/mlqe_ne-en/dict.en.txt'
+
         return Dictionary.load(filename)
 
     @classmethod

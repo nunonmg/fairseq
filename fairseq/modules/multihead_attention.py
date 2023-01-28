@@ -732,6 +732,11 @@ class MultiheadAttention(nn.Module):
         if before_softmax:
             return attn_weights, v
 
+        attn_weights_temperature = utils.softmax(
+            attn_weights, dim=-1, onnx_trace=self.onnx_trace
+        )
+        attn_weights_temperature = attn_weights_temperature.type_as(attn_weights_temperature)
+
         attn_weights_float = utils.softmax(
             attn_weights, dim=-1, onnx_trace=self.onnx_trace
         )
@@ -771,12 +776,12 @@ class MultiheadAttention(nn.Module):
         attn = self.out_proj(attn)
         attn_weights: Optional[Tensor] = None
         if need_weights:
-            attn_weights = attn_weights_float.view(
+            attn_weights = attn_weights_temperature.view(
                 bsz, self.num_heads, tgt_len, src_len
             ).transpose(1, 0)
             if not need_head_weights:
                 # average attention weights over heads
-                attn_weights = attn_weights.mean(dim=0)
+                attn_weights = attn_weights_temperature.mean(dim=0)
 
         return attn, attn_weights
 

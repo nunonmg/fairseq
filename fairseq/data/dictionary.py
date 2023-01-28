@@ -232,6 +232,7 @@ class Dictionary:
         to this instance.
         """
         if isinstance(f, str):
+            f = "/home/nunomg/hallucinations-in-mt/fairseq/checkpoints/M2M/model_dict.128k.txt"
             try:
                 with open(PathManager.get_local_path(f), "r", encoding="utf-8") as fd:
                     self.add_from_file(fd)
