@@ -12,17 +12,22 @@ import logging
 import math
 import os
 import sys
+import pickle
+import pandas as pd
+import numpy as np
+import sacrebleu.metrics    
+
 from argparse import Namespace
 from itertools import chain
 
 import numpy as np
 import torch
+from omegaconf import DictConfig
+
 from fairseq import checkpoint_utils, options, scoring, tasks, utils
-from fairseq.data import encoders
 from fairseq.dataclass.utils import convert_namespace_to_omegaconf
 from fairseq.logging import progress_bar
 from fairseq.logging.meters import StopwatchMeter, TimeMeter
-from omegaconf import DictConfig
 
 
 def main(cfg: DictConfig):
@@ -68,6 +73,7 @@ def _main(cfg: DictConfig, output_file):
 
     utils.import_user_module(cfg.common)
 
+
     if cfg.dataset.max_tokens is None and cfg.dataset.batch_size is None:
         cfg.dataset.max_tokens = 12000
     logger.info(cfg)
@@ -81,7 +87,6 @@ def _main(cfg: DictConfig, output_file):
 
     # Load dataset splits
     task = tasks.setup_task(cfg.task)
-    task.load_dataset(cfg.dataset.gen_subset)
 
     # Set dictionaries
     try:
@@ -94,7 +99,7 @@ def _main(cfg: DictConfig, output_file):
 
     # Load ensemble
     logger.info("loading model(s) from {}".format(cfg.common_eval.path))
-    models, _model_args = checkpoint_utils.load_model_ensemble(
+    models, saved_cfg = checkpoint_utils.load_model_ensemble(
         utils.split_paths(cfg.common_eval.path),
         arg_overrides=overrides,
         task=task,
@@ -102,6 +107,9 @@ def _main(cfg: DictConfig, output_file):
         strict=(cfg.checkpoint.checkpoint_shard_count == 1),
         num_shards=cfg.checkpoint.checkpoint_shard_count,
     )
+
+    # loading the dataset should happen after the checkpoint has been loaded so we can give it the saved task config
+    task.load_dataset(cfg.dataset.gen_subset, task_cfg=saved_cfg.task)
 
     if cfg.generation.lm_path is not None:
         overrides["data"] = cfg.task.data
@@ -167,8 +175,8 @@ def _main(cfg: DictConfig, output_file):
     )
 
     # Handle tokenization and BPE
-    tokenizer = encoders.build_tokenizer(cfg.tokenizer)
-    bpe = encoders.build_bpe(cfg.bpe)
+    tokenizer = task.build_tokenizer(cfg.tokenizer)
+    bpe = task.build_bpe(cfg.bpe)
 
     def decode_fn(x):
         if bpe is not None:
@@ -179,6 +187,19 @@ def _main(cfg: DictConfig, output_file):
 
     scorer = scoring.build_scorer(cfg.scoring, tgt_dict)
 
+    if not cfg.generation.score_reference:
+        dataframe_tag = "/dataframes/"
+        stats_tag = "/stats/" 
+    else:
+        dataframe_tag = "/dataframes_score_refs/"
+        stats_tag = "/stats_score_refs/"
+
+    if not os.path.exists(cfg.task.data + dataframe_tag):
+        os.makedirs(cfg.task.data + dataframe_tag)
+   
+    logger.info(cfg.task.data + dataframe_tag)
+
+    outputs_for_file = []
     num_sentences = 0
     has_target = True
     wps_meter = TimeMeter()
@@ -267,6 +288,14 @@ def _main(cfg: DictConfig, output_file):
                     remove_bpe=cfg.common_eval.post_process,
                     extra_symbols_to_ignore=get_symbols_to_strip_from_output(generator),
                 )
+                dict_for_output = {"idx": sample_id, "src": src_str, "mt": hypo_str, "ref": target_str, "src_ids": src_tokens.cpu().tolist(), "mt_ids": hypo["tokens"].cpu().tolist(), \
+                        "ref_ids": target_tokens.cpu().tolist()}
+
+                if hasattr(cfg.task, "decoder_langtok") and cfg.task.decoder_langtok:
+                    dict_for_output["score"] = round(np.mean(hypo["positional_scores"][1:].cpu().tolist()).item(),5)
+                else:
+                    dict_for_output["score"] = round(np.mean(hypo["positional_scores"].cpu().tolist()).item(),5)
+
                 detok_hypo_str = decode_fn(hypo_str)
                 if not cfg.common_eval.quiet:
                     score = hypo["score"] / math.log(2)  # convert to base 2
@@ -296,7 +325,7 @@ def _main(cfg: DictConfig, output_file):
                         file=output_file,
                     )
 
-                    if cfg.generation.print_alignment:
+                    if cfg.generation.print_alignment == "hard":
                         print(
                             "A-{}\t{}".format(
                                 sample_id,
@@ -305,6 +334,16 @@ def _main(cfg: DictConfig, output_file):
                                         "{}-{}".format(src_idx, tgt_idx)
                                         for src_idx, tgt_idx in alignment
                                     ]
+                                ),
+                            ),
+                            file=output_file,
+                        )
+                    if cfg.generation.print_alignment == "soft":
+                        print(
+                            "A-{}\t{}".format(
+                                sample_id,
+                                " ".join(
+                                    [",".join(src_probs) for src_probs in alignment]
                                 ),
                             ),
                             file=output_file,
@@ -333,7 +372,10 @@ def _main(cfg: DictConfig, output_file):
 
                 # Score only the top hypothesis
                 if has_target and j == 0:
-                    if align_dict is not None or cfg.common_eval.post_process is not None:
+                    if (
+                        align_dict is not None
+                        or cfg.common_eval.post_process is not None
+                    ):
                         # Convert back to tokens for evaluation with unk replacement and/or without BPE
                         target_tokens = tgt_dict.encode_line(
                             target_str, add_if_not_exist=True
@@ -345,6 +387,7 @@ def _main(cfg: DictConfig, output_file):
                         scorer.add_string(target_str, detok_hypo_str)
                     else:
                         scorer.add(target_tokens, hypo_tokens)
+                outputs_for_file.append(dict_for_output)
 
         wps_meter.update(num_generated_tokens)
         progress.log({"wps": round(wps_meter.avg)})
@@ -352,9 +395,19 @@ def _main(cfg: DictConfig, output_file):
             sample["nsentences"] if "nsentences" in sample else sample["id"].numel()
         )
 
+    dataframe_for_file = pd.DataFrame(outputs_for_file)
+    chrf = sacrebleu.metrics.CHRF(word_order=2)
+    chrf_scores = [chrf.sentence_score(h, [r]).score for h, r in zip(dataframe_for_file.mt.values, dataframe_for_file.ref.values)]
+    dataframe_for_file["chrf++"] = chrf_scores
+    ckpt_path = cfg.task.path.split("/")[-1].replace("_last_checkpoint.pt", "")
+    dataframe_saving_path = cfg.task.data + dataframe_tag + "df_gen_stats_" + cfg.task.source_lang + cfg.task.target_lang + "_" + ckpt_path + ".pkl"
+    dataframe_for_file.to_pickle(dataframe_saving_path)
+    logger.info("Saved Dataframe of results.")
+
+
     logger.info("NOTE: hypothesis and token scores are output in base 2")
     logger.info(
-        "Translated {} sentences ({} tokens) in {:.1f}s ({:.2f} sentences/s, {:.2f} tokens/s)".format(
+        "Translated {:,} sentences ({:,} tokens) in {:.1f}s ({:.2f} sentences/s, {:.2f} tokens/s)".format(
             num_sentences,
             gen_timer.n,
             gen_timer.sum,
@@ -385,7 +438,17 @@ def _main(cfg: DictConfig, output_file):
 
 def cli_main():
     parser = options.get_generation_parser()
+    # TODO: replace this workaround with refactoring of `AudioPretraining`
+    parser.add_argument(
+        "--arch",
+        "-a",
+        metavar="ARCH",
+        default="wav2vec2",
+        help="Model architecture. For constructing tasks that rely on "
+        "model args (e.g. `AudioPretraining`)",
+    )
     args = options.parse_args_and_arch(parser)
+    print(args)
     main(args)
 
 
